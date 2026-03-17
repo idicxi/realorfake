@@ -1,0 +1,112 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Genre {
+  SCIENCE
+  HISTORY
+  WEIRD
+  MIXED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  image        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  stats         PlayerStats?
+  sessions      GameSession[]
+  achievements  UserAchievement[]
+}
+
+model PlayerStats {
+  userId         String  @id
+  accuracy       Float   @default(0)
+  winStreak      Int     @default(0)
+  totalRounds    Int     @default(0)
+  correctAnswers Int     @default(0)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Fact {
+  id               String   @id @default(cuid())
+  genre            Genre
+  text             String
+  isTrue           Boolean
+  explanation      String
+  sources          String
+  funnyComment     String
+  hint1            String
+  hint2            String
+  hint3            String
+  crowdThinksTrue  Int      @default(50) // 0..100
+  createdAt        DateTime @default(now())
+
+  rounds GameRound[]
+}
+
+model GameSession {
+  id          String    @id @default(cuid())
+  userId      String?
+  genre       Genre
+  factIdsJson String
+  total       Int
+  current     Int       @default(0)
+  hintsUsed   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  user   User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  rounds GameRound[]
+}
+
+model GameRound {
+  id          String   @id @default(cuid())
+  sessionId   String
+  factId      String
+  index       Int
+  answer      Boolean?
+  isCorrect   Boolean?
+  crowdShown  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  session GameSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  fact    Fact        @relation(fields: [factId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, index])
+}
+
+model Achievement {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  title       String
+  description String
+  icon        String
+  createdAt   DateTime @default(now())
+
+  users UserAchievement[]
+}
+
+model UserAchievement {
+  id            String   @id @default(cuid())
+  userId        String
+  achievementId String
+  createdAt     DateTime @default(now())
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, achievementId])
+  @@index([userId, createdAt])
+}
+
