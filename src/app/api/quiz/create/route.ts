@@ -91,16 +91,16 @@ export async function POST(req: Request) {
     const parsed = quizCreateSchema.safeParse(json);
     
     if (!parsed.success) {
-      const errors = parsed.error.issues.map(err => {
-        const path = err.path.join('.');
-        return `${path}: ${err.message}`;
-      }).join(', ');
-      
-      return NextResponse.json(
-        { ok: false, error: `Ошибка валидации: ${errors}` },
-        { status: 400 }
-      );
-    }
+  const errors = parsed.error.issues.map(err => {
+    const path = err.path.join('.');
+    return `${path}: ${err.message}`;
+  }).join(', ');
+  
+  return NextResponse.json(
+    { ok: false, error: `Ошибка валидации: ${errors}` },
+    { status: 400 }
+  );
+}
 
     const { genre, facts } = parsed.data;
     console.log(`✅ Валидация пройдена. Жанр: ${genre}, вопросов: ${facts.length}`);

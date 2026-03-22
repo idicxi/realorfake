@@ -47,7 +47,6 @@ model Fact {
   isTrue           Boolean
   explanation      String
   sources          String
-  funnyComment     String
   hint1            String
   hint2            String
   hint3            String
