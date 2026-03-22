@@ -91,20 +91,14 @@ export async function POST(req: Request) {
     const parsed = quizCreateSchema.safeParse(json);
     
     if (!parsed.success) {
-      // Формируем подробное сообщение об ошибке
-      const errors = parsed.error.errors.map(err => {
+      const errors = parsed.error.issues.map(err => {
         const path = err.path.join('.');
         return `${path}: ${err.message}`;
       }).join(', ');
       
-      console.log("❌ Ошибка валидации:", errors);
-      
       return NextResponse.json(
-        {
-          ok: false,
-          error: `Ошибка валидации: ${errors}`,
-        },
-        { status: 400 },
+        { ok: false, error: `Ошибка валидации: ${errors}` },
+        { status: 400 }
       );
     }
 
