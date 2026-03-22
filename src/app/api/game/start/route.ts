@@ -87,7 +87,6 @@ export async function POST(req: Request) {
           hint3: true,
           explanation: true,
           sources: true,
-          funnyComment: true,
         },
       },
     },
