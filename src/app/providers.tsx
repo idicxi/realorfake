@@ -3,6 +3,9 @@
 import { SessionProvider } from "next-auth/react";
 import type { Session } from "next-auth";
 
+import { AchievementToastHost } from "@/components/AchievementToastHost";
+import { GameSessionProvider } from "@/context/GameSessionContext";
+
 export function Providers({
   children,
   session,
@@ -10,6 +13,13 @@ export function Providers({
   children: React.ReactNode;
   session: Session | null;
 }) {
-  return <SessionProvider session={session}>{children}</SessionProvider>;
+  return (
+    <SessionProvider session={session}>
+      <GameSessionProvider>
+        <AchievementToastHost />
+        {children}
+      </GameSessionProvider>
+    </SessionProvider>
+  );
 }
 

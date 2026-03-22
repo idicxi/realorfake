@@ -2,39 +2,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { prisma } from "@/server/db";
+import { awardAchievementsAndListNew } from "@/server/achievements";
 
 const answerSchema = z.object({
   sessionId: z.string().min(1),
   answer: z.boolean().nullable(),
 });
-
-async function awardAchievements(userId: string) {
-  const stats = await prisma.playerStats.findUnique({
-    where: { userId },
-    select: { totalRounds: true, correctAnswers: true, winStreak: true },
-  });
-  if (!stats) return;
-
-  const toAward: string[] = [];
-  if (stats.correctAnswers >= 1) toAward.push("first_win");
-  if (stats.winStreak >= 5) toAward.push("streak_5");
-  if (stats.totalRounds >= 10) toAward.push("truth_seeker");
-
-  if (toAward.length === 0) return;
-
-  const achievements = await prisma.achievement.findMany({
-    where: { key: { in: toAward } },
-    select: { id: true },
-  });
-
-  for (const a of achievements) {
-    await prisma.userAchievement.upsert({
-      where: { userId_achievementId: { userId, achievementId: a.id } },
-      update: {},
-      create: { userId, achievementId: a.id },
-    });
-  }
-}
 
 export async function POST(req: Request) {
   const json = await req.json().catch(() => null);
@@ -50,7 +23,7 @@ export async function POST(req: Request) {
       userId: true,
       current: true,
       total: true,
-      factIdsJson: true,
+      quizId: true,
       finishedAt: true,
     },
   });
@@ -58,19 +31,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Сессия не найдена." }, { status: 404 });
   }
 
-  const factIds = JSON.parse(game.factIdsJson) as string[];
-  const factId = factIds[game.current];
-  if (!factId) {
+  const round = await prisma.gameRound.findUnique({
+    where: { sessionId_index: { sessionId: game.id, index: game.current } },
+    select: { factId: true },
+  });
+  if (!round?.factId) {
     return NextResponse.json({ ok: false, error: "Раунд не найден." }, { status: 400 });
   }
 
   const fact = await prisma.fact.findUnique({
-    where: { id: factId },
+    where: { id: round.factId },
     select: {
       id: true,
       text: true,
       isTrue: true,
-      crowdThinksTrue: true,
       explanation: true,
       sources: true,
       funnyComment: true,
@@ -98,6 +72,15 @@ export async function POST(req: Request) {
       : { current: nextCurrent, hintsUsed: 0 },
   });
 
+  const [trueVotes, falseVotes] = await Promise.all([
+    prisma.gameRound.count({ where: { factId: fact.id, answer: true } }),
+    prisma.gameRound.count({ where: { factId: fact.id, answer: false } }),
+  ]);
+  const totalVotes = trueVotes + falseVotes;
+  const truePercent = totalVotes ? Math.round((trueVotes / totalVotes) * 100) : 50;
+  const falsePercent = 100 - truePercent;
+
+  let newAchievements: Awaited<ReturnType<typeof awardAchievementsAndListNew>> = [];
   if (game.userId) {
     const next = await prisma.playerStats.upsert({
       where: { userId: game.userId },
@@ -113,7 +96,7 @@ export async function POST(req: Request) {
         winStreak: isCorrect ? 1 : 0,
         accuracy: isCorrect ? 100 : 0,
       },
-      select: { totalRounds: true, correctAnswers: true, winStreak: true },
+      select: { totalRounds: true, correctAnswers: true, winStreak: true, accuracy: true },
     });
 
     const accuracy = next.totalRounds === 0 ? 0 : (next.correctAnswers / next.totalRounds) * 100;
@@ -122,33 +105,49 @@ export async function POST(req: Request) {
       data: { accuracy },
     });
 
-    await awardAchievements(game.userId);
+    newAchievements = await awardAchievementsAndListNew(game.userId);
   }
 
   let nextFact: { id: string; text: string } | null = null;
   if (!finished) {
-    const nextFactId = factIds[nextCurrent];
-    if (nextFactId) {
+    const nextRound = await prisma.gameRound.findUnique({
+      where: { sessionId_index: { sessionId: game.id, index: nextCurrent } },
+      select: { factId: true },
+    });
+    if (nextRound?.factId) {
       const nf = await prisma.fact.findUnique({
-        where: { id: nextFactId },
+        where: { id: nextRound.factId },
         select: { id: true, text: true },
       });
       if (nf) nextFact = nf;
     }
   }
 
+  const sessionAfter = await prisma.gameSession.findUnique({
+    where: { id: game.id },
+    select: { hintsBudgetRemaining: true },
+  });
+
   return NextResponse.json({
     ok: true,
     result: {
       isCorrect,
       correctAnswer: fact.isTrue,
-      crowdText: `${fact.crowdThinksTrue}% игроков считают это правдой`,
+      userAnswer: parsed.data.answer,
+      crowd: {
+        truePercent,
+        falsePercent,
+        trueVotes,
+        falseVotes,
+      },
       explanation: fact.explanation,
       sources: fact.sources,
       funnyComment: fact.funnyComment,
     },
     finished,
     next: nextFact ? { currentIndex: nextCurrent, fact: nextFact } : null,
+    hintsBudgetRemaining: sessionAfter?.hintsBudgetRemaining ?? 0,
+    newAchievements: newAchievements ?? [],
   });
 }
 

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getServerSession } from "next-auth";
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
 import { authOptions } from "@/server/auth";
 
@@ -27,60 +28,109 @@ export async function POST(req: Request) {
   }
 
   const genre = parsed.data.genre;
-  const where =
-    genre === "MIXED"
-      ? undefined
-      : {
-          genre,
-        };
+  const userId = session?.user?.id ?? null;
 
-  const facts = await prisma.fact.findMany({
-    where,
+  const finishedQuizIds = userId
+    ? await prisma.gameSession.findMany({
+        where: { userId, finishedAt: { not: null } },
+        select: { quizId: true },
+      }).then((rows) =>
+        rows
+          .map((r) => r.quizId)
+          .filter((id): id is string => !!id),
+      )
+    : [];
+
+  const baseQuizWhere: Prisma.QuizWhereInput = { genre };
+  const quizWhere: Prisma.QuizWhereInput =
+    finishedQuizIds.length > 0
+      ? { ...baseQuizWhere, id: { notIn: finishedQuizIds } }
+      : baseQuizWhere;
+
+  const candidatesRaw = await prisma.quiz.findMany({
+    where: quizWhere,
     select: {
       id: true,
-      genre: true,
-      text: true,
-      crowdThinksTrue: true,
-      hint1: true,
-      hint2: true,
-      hint3: true,
-      isTrue: true,
-      explanation: true,
-      sources: true,
-      funnyComment: true,
+      _count: { select: { quizFacts: true } },
     },
   });
 
-  if (facts.length === 0) {
-    return NextResponse.json({ ok: false, error: "Нет фактов в базе." }, { status: 404 });
+  const candidates = candidatesRaw.filter((c) => c._count.quizFacts === 3);
+
+  if (candidates.length === 0) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          "Нет доступных квизов на 3 вопроса в этом жанре (или вы уже прошли все).",
+      },
+      { status: 404 },
+    );
   }
 
-  const picked = shuffle(facts).slice(0, Math.min(10, facts.length));
-  const factIds = picked.map((f) => f.id);
+  const chosenQuizId = shuffle(candidates.map((c) => c.id))[0]!;
+
+  const quizFacts = await prisma.quizFact.findMany({
+    where: { quizId: chosenQuizId },
+    orderBy: { index: "asc" },
+    select: {
+      factId: true,
+      fact: {
+        select: {
+          id: true,
+          text: true,
+          isTrue: true,
+          hint1: true,
+          hint2: true,
+          hint3: true,
+          explanation: true,
+          sources: true,
+          funnyComment: true,
+        },
+      },
+    },
+  });
+
+  if (quizFacts.length !== 3) {
+    return NextResponse.json(
+      { ok: false, error: "Квиз должен содержать ровно 3 вопроса." },
+      { status: 500 },
+    );
+  }
 
   const game = await prisma.gameSession.create({
     data: {
-      userId: session?.user?.id ?? null,
-      genre,
-      factIdsJson: JSON.stringify(factIds),
-      total: picked.length,
+      userId,
+      quizId: chosenQuizId,
+      total: quizFacts.length,
+      hintsUsed: 0,
+      hintsBudgetRemaining: 6,
+      current: 0,
       rounds: {
-        create: picked.map((f, idx) => ({
+        create: quizFacts.map((qf, idx) => ({
           index: idx,
-          factId: f.id,
+          factId: qf.factId,
         })),
       },
     },
-    select: { id: true, total: true, current: true, hintsUsed: true },
+    select: {
+      id: true,
+      total: true,
+      current: true,
+      hintsUsed: true,
+      hintsBudgetRemaining: true,
+    },
   });
 
-  const first = picked[0]!;
+  const first = quizFacts[0]!.fact;
   return NextResponse.json({
     ok: true,
     sessionId: game.id,
     total: game.total,
     currentIndex: 0,
     hintsUsed: 0,
+    hintsBudgetRemaining: game.hintsBudgetRemaining,
+    maxHintsPerQuestion: 1,
     fact: { id: first.id, text: first.text },
   });
 }

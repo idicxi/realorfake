@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
+import type { AchievementPayload } from "@/components/AchievementToastHost";
+import { useGameSession } from "@/context/GameSessionContext";
 
 type Genre = "SCIENCE" | "HISTORY" | "WEIRD" | "MIXED";
 
@@ -13,11 +15,26 @@ type Stats = {
 };
 
 type GameStartRes =
-  | { ok: true; sessionId: string; total: number; currentIndex: number; hintsUsed: number; fact: { id: string; text: string } }
+  | {
+      ok: true;
+      sessionId: string;
+      total: number;
+      currentIndex: number;
+      hintsUsed: number;
+      hintsBudgetRemaining: number;
+      maxHintsPerQuestion: number;
+      fact: { id: string; text: string };
+    }
   | { ok: false; error: string };
 
 type HintRes =
-  | { ok: true; hint: string; hintsUsed: number; hintsLeft: number }
+  | {
+      ok: true;
+      hint: string;
+      hintsUsed: number;
+      hintsBudgetRemaining: number;
+      hintsLeftThisQuestion: number;
+    }
   | { ok: false; error: string };
 
 type AnswerRes =
@@ -26,30 +43,49 @@ type AnswerRes =
       result: {
         isCorrect: boolean;
         correctAnswer: boolean;
-        crowdText: string;
+        userAnswer: boolean | null;
+        crowd: {
+          truePercent: number;
+          falsePercent: number;
+          trueVotes: number;
+          falseVotes: number;
+        };
         explanation: string;
         sources: string;
         funnyComment: string;
       };
       finished: boolean;
       next: null | { currentIndex: number; fact: { id: string; text: string } };
+      hintsBudgetRemaining: number;
+      newAchievements: AchievementPayload[];
     }
   | { ok: false; error: string };
 
 type Reveal = {
   isCorrect: boolean;
   correctAnswer: boolean;
-  crowdText: string;
+  userAnswer: boolean | null;
+  crowd: {
+    truePercent: number;
+    falsePercent: number;
+    trueVotes: number;
+    falseVotes: number;
+  };
   explanation: string;
   sources: string;
   funnyComment: string;
 };
 
+function emitAchievements(list: AchievementPayload[]) {
+  if (!list.length) return;
+  window.dispatchEvent(new CustomEvent("achievement-unlocked", { detail: list }));
+}
+
 function Pill({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 px-5 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.06)_inset]">
-      <div className="text-xs font-semibold text-white/60">{label}</div>
-      <div className="mt-1 text-2xl font-black tracking-tight">{value}</div>
+    <div className="glass-card rounded-2xl px-5 py-4">
+      <div className="text-xs font-semibold text-white/55">{label}</div>
+      <div className="mt-1 text-2xl font-black tracking-tight text-white">{value}</div>
     </div>
   );
 }
@@ -62,6 +98,9 @@ function genreLabel(g: Genre) {
 }
 
 export default function GameClient() {
+  const gameSession = useGameSession();
+  const setActiveSessionId = gameSession?.setActiveSessionId;
+
   const [stats, setStats] = useState<Stats>({ accuracy: 0, winStreak: 0, totalRounds: 0 });
 
   const [genre, setGenre] = useState<Genre>("MIXED");
@@ -71,42 +110,126 @@ export default function GameClient() {
   const [factText, setFactText] = useState<string | null>(null);
 
   const [hints, setHints] = useState<string[]>([]);
-  const [hintsLeft, setHintsLeft] = useState(3);
+  const [hintsBudgetRemaining, setHintsBudgetRemaining] = useState(6);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [timer, setTimer] = useState(20);
   const intervalRef = useRef<number | null>(null);
+  const questionEndsAtRef = useRef<number | null>(null);
+  const timeoutSubmittedRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  const QUESTION_SECONDS = 20;
+
+  const [crowdAnim, setCrowdAnim] = useState<{ truePercent: number; falsePercent: number }>({
+    truePercent: 0,
+    falsePercent: 0,
+  });
 
   const [reveal, setReveal] = useState<Reveal | null>(null);
   const [finished, setFinished] = useState(false);
 
-  const playing = useMemo(() => !!sessionId && !!factText && !reveal && !finished, [sessionId, factText, reveal, finished]);
+  const playing = useMemo(
+    () => !!sessionId && !!factText && !reveal && !finished,
+    [sessionId, factText, reveal, finished],
+  );
+
+  const questionHintUsed = hints.length >= 1;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (intervalRef.current) window.clearInterval(intervalRef.current);
+      intervalRef.current = null;
+      setActiveSessionId?.(null);
+    };
+  }, [setActiveSessionId]);
 
   async function refreshStats() {
-    const res = await fetch("/api/me/stats", { cache: "no-store" });
+    const res = await fetch("/api/me/stats", { cache: "no-store", credentials: "include" });
     const data = (await res.json()) as { ok: true; stats: Stats };
     if (data?.ok) setStats(data.stats);
   }
 
   useEffect(() => {
-    refreshStats();
+    queueMicrotask(() => {
+      void refreshStats();
+    });
   }, []);
+
+  const lastAnswerRef = useRef<AnswerRes | null>(null);
+
+  const submitAnswerAndStore = useCallback(
+    async (answer: boolean | null) => {
+      if (!sessionId) return;
+      setLoading(true);
+      setError(null);
+
+      if (intervalRef.current) window.clearInterval(intervalRef.current);
+      intervalRef.current = null;
+
+      const res = await fetch("/api/game/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ sessionId, answer }),
+      });
+      const data = (await res.json().catch(() => null)) as AnswerRes | null;
+      if (!mountedRef.current) return;
+      setLoading(false);
+
+      if (!res.ok || !data || ("ok" in data && data.ok === false)) {
+        setError((data && "error" in data ? data.error : null) ?? "Не удалось отправить ответ.");
+        return;
+      }
+
+      lastAnswerRef.current = data;
+      if (data.ok) {
+        setReveal(data.result);
+        setFinished(data.finished);
+        setCrowdAnim({ truePercent: 0, falsePercent: 0 });
+        setHintsBudgetRemaining(data.hintsBudgetRemaining);
+        emitAchievements(data.newAchievements ?? []);
+        if (data.finished) setActiveSessionId?.(null);
+        await refreshStats();
+      }
+    },
+    [sessionId, setActiveSessionId],
+  );
 
   useEffect(() => {
     if (!playing) return;
-    setTimer(20);
+
+    queueMicrotask(() => {
+      timeoutSubmittedRef.current = false;
+      questionEndsAtRef.current = Date.now() + QUESTION_SECONDS * 1000;
+      setTimer(QUESTION_SECONDS);
+    });
 
     if (intervalRef.current) window.clearInterval(intervalRef.current);
     intervalRef.current = window.setInterval(() => {
-      setTimer((t) => t - 1);
-    }, 1000);
+      const endsAt = questionEndsAtRef.current;
+      if (!endsAt) return;
+      const remainingMs = endsAt - Date.now();
+      const nextTimer = Math.max(0, Math.ceil(remainingMs / 1000));
+      setTimer(nextTimer);
+
+      if (remainingMs <= 0 && !timeoutSubmittedRef.current) {
+        timeoutSubmittedRef.current = true;
+        if (intervalRef.current) window.clearInterval(intervalRef.current);
+        intervalRef.current = null;
+        void submitAnswerAndStore(null);
+      }
+    }, 200);
 
     return () => {
       if (intervalRef.current) window.clearInterval(intervalRef.current);
       intervalRef.current = null;
+      questionEndsAtRef.current = null;
     };
-  }, [playing, currentIndex]);
+  }, [playing, currentIndex, submitAnswerAndStore]);
 
   async function startGame() {
     setLoading(true);
@@ -114,15 +237,17 @@ export default function GameClient() {
     setReveal(null);
     setFinished(false);
     setHints([]);
-    setHintsLeft(3);
+    setHintsBudgetRemaining(6);
 
     const res = await fetch("/api/game/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ genre }),
     });
 
     const data = (await res.json().catch(() => null)) as GameStartRes | null;
+    if (!mountedRef.current) return;
     setLoading(false);
 
     if (!res.ok || !data || !("ok" in data) || data.ok === false) {
@@ -131,22 +256,27 @@ export default function GameClient() {
     }
 
     setSessionId(data.sessionId);
+    setActiveSessionId?.(data.sessionId);
     setTotal(data.total);
     setCurrentIndex(data.currentIndex);
     setFactText(data.fact.text);
+    setHintsBudgetRemaining(data.hintsBudgetRemaining);
   }
 
   async function takeHint() {
     if (!sessionId) return;
+    if (questionHintUsed) return;
     setLoading(true);
     setError(null);
 
     const res = await fetch("/api/game/hint", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ sessionId }),
     });
     const data = (await res.json().catch(() => null)) as HintRes | null;
+    if (!mountedRef.current) return;
     setLoading(false);
 
     if (!res.ok || !data || ("ok" in data && data.ok === false)) {
@@ -156,58 +286,85 @@ export default function GameClient() {
 
     if (data.ok) {
       setHints((h) => [...h, data.hint]);
-      setHintsLeft(data.hintsLeft);
+      setHintsBudgetRemaining(data.hintsBudgetRemaining);
     }
   }
 
-  // Slightly hacky: keep the last answer response in a ref so "Дальше" can advance without extra API.
-  const lastAnswerRef = useRef<AnswerRes | null>(null);
-  async function submitAnswerAndStore(answer: boolean | null) {
-    if (!sessionId) return;
-    setLoading(true);
-    setError(null);
+  useEffect(() => {
+    if (!reveal) return;
+    const toTrue = reveal.crowd.truePercent;
+    const durationMs = 900;
+    const start = performance.now();
 
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / durationMs);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const nextTrue = Math.round(toTrue * eased);
+      setCrowdAnim({ truePercent: nextTrue, falsePercent: 100 - nextTrue });
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [reveal]);
+
+  function resetToLobby() {
     if (intervalRef.current) window.clearInterval(intervalRef.current);
     intervalRef.current = null;
+    questionEndsAtRef.current = null;
+    setActiveSessionId?.(null);
+    setSessionId(null);
+    setFactText(null);
+    setReveal(null);
+    setFinished(false);
+    setHints([]);
+    setHintsBudgetRemaining(6);
+    setError(null);
+    lastAnswerRef.current = null;
+  }
 
-    const res = await fetch("/api/game/answer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, answer }),
-    });
-    const data = (await res.json().catch(() => null)) as AnswerRes | null;
-    setLoading(false);
-
-    if (!res.ok || !data || ("ok" in data && data.ok === false)) {
-      setError((data && "error" in data ? data.error : null) ?? "Не удалось отправить ответ.");
+  async function exitGame() {
+    if (!sessionId) {
+      resetToLobby();
       return;
     }
 
-    lastAnswerRef.current = data;
-    if (data.ok) {
-      setReveal(data.result);
-      setFinished(data.finished);
+    if (intervalRef.current) window.clearInterval(intervalRef.current);
+    intervalRef.current = null;
+    questionEndsAtRef.current = null;
+
+    setLoading(true);
+    const res = await fetch("/api/game/abandon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ sessionId }),
+    });
+    const data = (await res.json().catch(() => null)) as null | {
+      ok: boolean;
+      newAchievements?: AchievementPayload[];
+      error?: string;
+    };
+    if (!mountedRef.current) return;
+    setLoading(false);
+
+    if (data?.ok) {
+      emitAchievements(data.newAchievements ?? []);
       await refreshStats();
+    } else {
+      setError(data?.error ?? "Не удалось сохранить выход на сервере, но экран игры сброшен.");
     }
+
+    resetToLobby();
   }
 
-  // use submitAnswerAndStore everywhere
   async function onTruth() {
     await submitAnswerAndStore(true);
   }
   async function onLie() {
     await submitAnswerAndStore(false);
   }
-  async function onTimeout() {
-    await submitAnswerAndStore(null);
-  }
-
-  useEffect(() => {
-    if (!playing) return;
-    if (timer > 0) return;
-    void onTimeout();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timer, playing]);
 
   function advanceFromStoredNext() {
     const data = lastAnswerRef.current;
@@ -218,12 +375,12 @@ export default function GameClient() {
     setFactText(data.next.fact.text);
     setReveal(null);
     setHints([]);
-    setHintsLeft(3);
-    setTimer(20);
+    setHintsBudgetRemaining(data.hintsBudgetRemaining);
+    setTimer(QUESTION_SECONDS);
   }
 
   return (
-    <div className="space-y-6">
+    <div className="relative z-0 space-y-6">
       <section className="grid gap-3 sm:grid-cols-3">
         <Pill label="Точность" value={`${Math.round(stats.accuracy)}%`} />
         <Pill label="Серия побед" value={`${stats.winStreak}`} />
@@ -231,16 +388,18 @@ export default function GameClient() {
       </section>
 
       {!sessionId ? (
-        <section className="rounded-3xl border border-white/10 bg-white/5 p-8 shadow-[0_0_0_1px_rgba(255,255,255,0.06)_inset]">
-          <h1 className="text-3xl font-black tracking-tight">Игра</h1>
-          <p className="mt-2 text-sm text-white/70">
-            Выберите жанр и нажмите «Играть». Подсказок — до 3 на вопрос.
+        <section className="glass-card p-8 md:p-10">
+          <h1 className="text-3xl font-black tracking-tight text-white md:text-4xl">Игра</h1>
+          <p className="mt-2 max-w-xl text-sm leading-relaxed text-white/65">
+            В каждом квизе <span className="font-semibold text-violet-200">3 вопроса</span>. На весь раунд — до 6
+            подсказок; на один вопрос — одна подсказка.
           </p>
 
           <div className="mt-6 grid gap-2 sm:grid-cols-4">
             {(["MIXED", "SCIENCE", "HISTORY", "WEIRD"] as const).map((g) => (
               <button
                 key={g}
+                type="button"
                 onClick={() => setGenre(g)}
                 className={`h-12 rounded-2xl border text-sm font-semibold transition ${
                   genre === g
@@ -266,25 +425,46 @@ export default function GameClient() {
           </div>
         </section>
       ) : (
-        <section className="rounded-3xl border border-white/10 bg-white/5 p-8 shadow-[0_0_0_1px_rgba(255,255,255,0.06)_inset]">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <section className="glass-card p-8 md:p-10">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="text-sm font-semibold text-white/70">
               Вопрос <span className="text-white">{currentIndex + 1}</span> из{" "}
               <span className="text-white">{total}</span>
             </div>
 
-            <div className="rounded-full border border-white/10 bg-black/30 px-4 py-2 text-sm font-semibold text-white/80">
-              Таймер: <span className="text-white">{Math.max(timer, 0)}с</span>
-            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-3">
+                <div className="relative grid h-12 w-12 place-items-center">
+                  <div
+                    className="absolute inset-0 rounded-full"
+                    style={{
+                      background: `conic-gradient(from 180deg, rgba(124,58,237,0.95) ${(
+                        (timer / QUESTION_SECONDS) *
+                        100
+                      ).toFixed(0)}%, rgba(255,255,255,0.10) 0%)`,
+                    }}
+                  />
+                  <div className="relative grid h-9 w-9 place-items-center rounded-full border border-white/10 bg-black/25">
+                    <div className="text-xs font-black text-white">{Math.max(timer, 0)}с</div>
+                  </div>
+                </div>
+                <div className="text-sm font-semibold text-white/70">Таймер</div>
+              </div>
 
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={takeHint}
-              disabled={loading || !!reveal || hintsLeft <= 0}
-            >
-              Подсказка ({hintsLeft}/3)
-            </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={takeHint}
+                disabled={loading || !!reveal || questionHintUsed || hintsBudgetRemaining <= 0}
+              >
+                Подсказка
+              </Button>
+
+              <Button variant="ghost" size="sm" type="button" onClick={exitGame} disabled={loading}>
+                Выйти из игры
+              </Button>
+            </div>
           </div>
 
           <div className="mt-6 rounded-3xl border border-white/10 bg-black/25 p-7">
@@ -299,8 +479,7 @@ export default function GameClient() {
                   key={idx}
                   className="rounded-2xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-100/90"
                 >
-                  <span className="font-semibold text-violet-200">Улика {idx + 1}:</span>{" "}
-                  {h}
+                  <span className="font-semibold text-violet-200">Подсказка:</span> {h}
                 </div>
               ))}
             </div>
@@ -314,10 +493,10 @@ export default function GameClient() {
 
           {!reveal ? (
             <div className="mt-7 grid gap-3 sm:grid-cols-2">
-              <Button size="lg" onClick={onTruth} disabled={loading}>
+              <Button size="lg" type="button" onClick={onTruth} disabled={loading}>
                 Правда
               </Button>
-              <Button size="lg" variant="secondary" onClick={onLie} disabled={loading}>
+              <Button size="lg" variant="secondary" type="button" onClick={onLie} disabled={loading}>
                 Ложь
               </Button>
             </div>
@@ -330,13 +509,38 @@ export default function GameClient() {
                     : "border-rose-400/25 bg-rose-500/10"
                 }`}
               >
-                <div className="text-sm font-bold">
-                  {reveal.isCorrect ? "Верно!" : "Неверно."}{" "}
-                  <span className="text-white/70">
-                    Правильный ответ: {reveal.correctAnswer ? "правда" : "ложь"}
-                  </span>
+                <div className="text-sm font-bold">{reveal.isCorrect ? "Верно!" : "Неверно."}</div>
+                <div className="mt-2 text-sm text-white/70">
+                  Правильный ответ: {reveal.correctAnswer ? "правда" : "ложь"}
+                  {reveal.userAnswer === null ? " (время вышло)" : ""}
                 </div>
-                <div className="mt-2 text-sm text-white/70">{reveal.crowdText}</div>
+
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+                    <div className="text-xs font-semibold text-white/60">Правда</div>
+                    <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/10">
+                      <div
+                        className="h-full rounded-full bg-violet-400/80"
+                        style={{ width: `${crowdAnim.truePercent}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 text-right text-sm font-bold text-white/90">
+                      {crowdAnim.truePercent}%
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-black/25 p-4">
+                    <div className="text-xs font-semibold text-white/60">Ложь</div>
+                    <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/10">
+                      <div
+                        className="h-full rounded-full bg-fuchsia-400/80"
+                        style={{ width: `${crowdAnim.falsePercent}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 text-right text-sm font-bold text-white/90">
+                      {crowdAnim.falsePercent}%
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="rounded-3xl border border-white/10 bg-black/25 p-6">
@@ -349,26 +553,15 @@ export default function GameClient() {
 
               {finished ? (
                 <div className="flex flex-col gap-3 sm:flex-row">
-                  <Button size="lg" onClick={() => window.location.reload()}>
+                  <Button size="lg" type="button" onClick={() => window.location.reload()}>
                     Сыграть ещё раз
                   </Button>
-                  <Button
-                    size="lg"
-                    variant="secondary"
-                    onClick={() => {
-                      setSessionId(null);
-                      setFactText(null);
-                      setReveal(null);
-                      setFinished(false);
-                      setHints([]);
-                      setHintsLeft(3);
-                    }}
-                  >
+                  <Button size="lg" variant="secondary" type="button" onClick={resetToLobby}>
                     Выбор жанра
                   </Button>
                 </div>
               ) : (
-                <Button size="lg" onClick={advanceFromStoredNext}>
+                <Button size="lg" type="button" onClick={advanceFromStoredNext}>
                   Дальше
                 </Button>
               )}
@@ -379,4 +572,3 @@ export default function GameClient() {
     </div>
   );
 }
-

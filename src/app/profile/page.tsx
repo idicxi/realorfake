@@ -15,11 +15,20 @@ export default async function ProfilePage() {
   });
   if (!user) redirect("/login");
 
-  const achievements = await prisma.userAchievement.findMany({
-    where: { userId: session.user.id },
-    orderBy: { createdAt: "desc" },
-    include: { achievement: true },
-  });
+  const [userAchievements, allAchievementDefs] = await Promise.all([
+    prisma.userAchievement.findMany({
+      where: { userId: session.user.id },
+      orderBy: { createdAt: "desc" },
+      include: { achievement: true },
+    }),
+    prisma.achievement.findMany({
+      orderBy: { key: "asc" },
+      select: { id: true, key: true, title: true, description: true, icon: true },
+    }),
+  ]);
+
+  const unlockedIds = new Set(userAchievements.map((ua) => ua.achievementId));
+  const lockedAchievements = allAchievementDefs.filter((a) => !unlockedIds.has(a.id));
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-10">
@@ -31,15 +40,20 @@ export default async function ProfilePage() {
           winStreak: user.stats?.winStreak ?? 0,
           totalRounds: user.stats?.totalRounds ?? 0,
         }}
-        achievements={achievements.map((ua) => ({
+        achievements={userAchievements.map((ua) => ({
           id: ua.achievementId,
           title: ua.achievement.title,
           description: ua.achievement.description,
           icon: ua.achievement.icon,
           createdAt: ua.createdAt.toISOString(),
         }))}
+        lockedAchievements={lockedAchievements.map((a) => ({
+          id: a.id,
+          title: a.title,
+          description: a.description,
+          icon: a.icon,
+        }))}
       />
     </main>
   );
 }
-

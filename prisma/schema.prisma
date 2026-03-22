@@ -25,6 +25,7 @@ model User {
 
   stats         PlayerStats?
   sessions      GameSession[]
+  quizzes       Quiz[]
   achievements  UserAchievement[]
 }
 
@@ -53,20 +54,47 @@ model Fact {
   createdAt        DateTime @default(now())
 
   rounds GameRound[]
+  quizFacts QuizFact[]
+}
+
+model Quiz {
+  id               String    @id @default(cuid())
+  genre            Genre
+  title            String    @default("Квиз")
+  createdByUserId  String?
+  createdByUser    User?     @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt        DateTime  @default(now())
+
+  quizFacts QuizFact[]
+  sessions  GameSession[]
+}
+
+model QuizFact {
+  id        String @id @default(cuid())
+  quizId    String
+  factId    String
+  index     Int
+
+  quiz Quiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  fact Fact @relation(fields: [factId], references: [id], onDelete: Cascade)
+
+  @@unique([quizId, index])
 }
 
 model GameSession {
   id          String    @id @default(cuid())
   userId      String?
-  genre       Genre
-  factIdsJson String
+  quizId      String?
   total       Int
   current     Int       @default(0)
   hintsUsed   Int       @default(0)
+  /// Сколько подсказок осталось на весь квиз (макс. 6)
+  hintsBudgetRemaining Int @default(6)
   createdAt   DateTime  @default(now())
   finishedAt  DateTime?
 
   user   User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  quiz   Quiz?       @relation(fields: [quizId], references: [id], onDelete: Cascade)
   rounds GameRound[]
 }
 
