@@ -95,7 +95,7 @@ export default function QuizCreateClient() {
     const parsed = quizDraftSchema.safeParse(draft);
     
     if (!parsed.success) {
-      const errors = parsed.error.errors.map(err => err.message).join(", ");
+      const errors = parsed.error.issues.map(err => err.message).join(", ");
       setError(`Ошибка валидации: ${errors}`);
       return;
     }
