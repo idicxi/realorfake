@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useSession } from "next-auth/react";
 
 import { Button } from "@/components/ui/Button";
 import type { AchievementPayload } from "@/components/AchievementToastHost";
@@ -52,7 +54,6 @@ type AnswerRes =
         };
         explanation: string;
         sources: string;
-        funnyComment: string;
       };
       finished: boolean;
       next: null | { currentIndex: number; fact: { id: string; text: string } };
@@ -73,7 +74,6 @@ type Reveal = {
   };
   explanation: string;
   sources: string;
-  funnyComment: string;
 };
 
 function emitAchievements(list: AchievementPayload[]) {
@@ -98,6 +98,8 @@ function genreLabel(g: Genre) {
 }
 
 export default function GameClient() {
+  const router = useRouter();
+  const { data: session, status } = useSession();
   const gameSession = useGameSession();
   const setActiveSessionId = gameSession?.setActiveSessionId;
 
@@ -110,7 +112,7 @@ export default function GameClient() {
   const [factText, setFactText] = useState<string | null>(null);
 
   const [hints, setHints] = useState<string[]>([]);
-  const [hintsBudgetRemaining, setHintsBudgetRemaining] = useState(6);
+  const [hintsBudgetRemaining, setHintsBudgetRemaining] = useState(3);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -232,35 +234,64 @@ export default function GameClient() {
   }, [playing, currentIndex, submitAnswerAndStore]);
 
   async function startGame() {
+    // Проверка авторизации - редирект на вход
+    if (status !== "authenticated" || !session?.user?.id) {
+      router.push("/login");
+      return;
+    }
+
+    console.log("🎮 Starting game with genre:", genre);
     setLoading(true);
     setError(null);
     setReveal(null);
     setFinished(false);
     setHints([]);
-    setHintsBudgetRemaining(6);
+    setHintsBudgetRemaining(3);
 
-    const res = await fetch("/api/game/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ genre }),
-    });
+    try {
+      const res = await fetch("/api/game/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ genre }),
+      });
 
-    const data = (await res.json().catch(() => null)) as GameStartRes | null;
-    if (!mountedRef.current) return;
-    setLoading(false);
+      console.log("📡 Response status:", res.status);
+      const rawData = await res.text();
+      console.log("📦 Raw response:", rawData);
 
-    if (!res.ok || !data || !("ok" in data) || data.ok === false) {
-      setError((data && "error" in data ? data.error : null) ?? "Не удалось начать игру.");
-      return;
+      let data: GameStartRes | null = null;
+      try {
+        data = JSON.parse(rawData) as GameStartRes;
+      } catch (e) {
+        console.error("❌ Failed to parse JSON:", e);
+        setError("Сервер вернул некорректный ответ");
+        setLoading(false);
+        return;
+      }
+
+      if (!mountedRef.current) return;
+      setLoading(false);
+
+      if (!res.ok || !data || !("ok" in data) || data.ok === false) {
+        const errorMsg = (data && "error" in data ? data.error : null) ?? "Не удалось начать игру.";
+        console.error("❌ Game start failed:", errorMsg);
+        setError(errorMsg);
+        return;
+      }
+
+      console.log("✅ Game started successfully:", data);
+      setSessionId(data.sessionId);
+      setActiveSessionId?.(data.sessionId);
+      setTotal(data.total);
+      setCurrentIndex(data.currentIndex);
+      setFactText(data.fact.text);
+      setHintsBudgetRemaining(data.hintsBudgetRemaining);
+    } catch (err) {
+      console.error("🔥 Unexpected error:", err);
+      setError("Произошла ошибка при запуске игры");
+      setLoading(false);
     }
-
-    setSessionId(data.sessionId);
-    setActiveSessionId?.(data.sessionId);
-    setTotal(data.total);
-    setCurrentIndex(data.currentIndex);
-    setFactText(data.fact.text);
-    setHintsBudgetRemaining(data.hintsBudgetRemaining);
   }
 
   async function takeHint() {
@@ -319,7 +350,7 @@ export default function GameClient() {
     setReveal(null);
     setFinished(false);
     setHints([]);
-    setHintsBudgetRemaining(6);
+    setHintsBudgetRemaining(3);
     setError(null);
     lastAnswerRef.current = null;
   }
@@ -391,8 +422,8 @@ export default function GameClient() {
         <section className="glass-card p-8 md:p-10">
           <h1 className="text-3xl font-black tracking-tight text-white md:text-4xl">Игра</h1>
           <p className="mt-2 max-w-xl text-sm leading-relaxed text-white/65">
-            В каждом квизе <span className="font-semibold text-violet-200">3 вопроса</span>. На весь раунд — до 6
-            подсказок; на один вопрос — одна подсказка.
+            В каждом квизе может быть от 5 до 20 вопросов. На весь раунд — до 3 подсказок; на один вопрос — одна
+            подсказка.
           </p>
 
           <div className="mt-6 grid gap-2 sm:grid-cols-4">
@@ -451,6 +482,12 @@ export default function GameClient() {
                 <div className="text-sm font-semibold text-white/70">Таймер</div>
               </div>
 
+              <div className="flex items-center gap-2 rounded-full bg-black/40 px-3 py-1.5">
+                <span className="text-xs text-white/70">💡 Осталось:</span>
+                <span className="text-sm font-bold text-violet-300">{hintsBudgetRemaining}</span>
+                <span className="text-xs text-white/50">/ 3</span>
+              </div>
+
               <Button
                 variant="secondary"
                 size="sm"
@@ -458,7 +495,7 @@ export default function GameClient() {
                 onClick={takeHint}
                 disabled={loading || !!reveal || questionHintUsed || hintsBudgetRemaining <= 0}
               >
-                Подсказка
+                Подсказка {hintsBudgetRemaining}/{3}
               </Button>
 
               <Button variant="ghost" size="sm" type="button" onClick={exitGame} disabled={loading}>
@@ -474,14 +511,19 @@ export default function GameClient() {
 
           {hints.length ? (
             <div className="mt-5 grid gap-2">
-              {hints.map((h, idx) => (
-                <div
-                  key={idx}
-                  className="rounded-2xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-100/90"
-                >
-                  <span className="font-semibold text-violet-200">Подсказка:</span> {h}
-                </div>
-              ))}
+              {hints.map((h, idx) => {
+                const totalHints = hints.length + hintsBudgetRemaining;
+                return (
+                  <div
+                    key={idx}
+                    className="rounded-2xl border border-violet-400/20 bg-violet-500/10 px-4 py-3 text-sm text-violet-100/90"
+                  >
+                    <span className="font-semibold text-violet-200">
+                      Подсказка {idx + 1}/{totalHints}:
+                    </span> {h}
+                  </div>
+                );
+              })}
             </div>
           ) : null}
 
@@ -546,9 +588,12 @@ export default function GameClient() {
               <div className="rounded-3xl border border-white/10 bg-black/25 p-6">
                 <div className="text-xs font-semibold text-white/60">Почему это правда/ложь?</div>
                 <div className="mt-3 text-sm leading-6 text-white/80">{reveal.explanation}</div>
-                <div className="mt-4 text-xs font-semibold text-white/60">Источники</div>
-                <div className="mt-2 text-sm leading-6 text-white/70">{reveal.sources}</div>
-                <div className="mt-4 text-sm text-violet-200/90">{reveal.funnyComment}</div>
+                {reveal.sources && reveal.sources.trim() !== "" && (
+                  <>
+                    <div className="mt-4 text-xs font-semibold text-white/60">Источники</div>
+                    <div className="mt-2 text-sm leading-6 text-white/70">{reveal.sources}</div>
+                  </>
+                )}
               </div>
 
               {finished ? (

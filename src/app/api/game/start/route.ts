@@ -55,14 +55,16 @@ export async function POST(req: Request) {
     },
   });
 
-  const candidates = candidatesRaw.filter((c) => c._count.quizFacts === 3);
+  // ИСПРАВЛЕНИЕ 1: Убираем фильтрацию по 3 вопросам, теперь берем любые квизы
+  // с количеством вопросов от 1 до 20 (или больше, если нужно)
+  const candidates = candidatesRaw.filter((c) => c._count.quizFacts >= 1 && c._count.quizFacts <= 20);
 
   if (candidates.length === 0) {
     return NextResponse.json(
       {
         ok: false,
         error:
-          "Нет доступных квизов на 3 вопроса в этом жанре (или вы уже прошли все).",
+          "Нет доступных квизов в этом жанре (или вы уже прошли все).",
       },
       { status: 404 },
     );
@@ -91,9 +93,11 @@ export async function POST(req: Request) {
     },
   });
 
-  if (quizFacts.length !== 3) {
+  // ИСПРАВЛЕНИЕ 2: Убираем жесткую проверку на 3 вопроса
+  // Теперь разрешаем любое количество вопросов
+  if (quizFacts.length === 0) {
     return NextResponse.json(
-      { ok: false, error: "Квиз должен содержать ровно 3 вопроса." },
+      { ok: false, error: "Квиз не содержит вопросов." },
       { status: 500 },
     );
   }
@@ -104,7 +108,7 @@ export async function POST(req: Request) {
       quizId: chosenQuizId,
       total: quizFacts.length,
       hintsUsed: 0,
-      hintsBudgetRemaining: 6,
+      hintsBudgetRemaining: 3,
       current: 0,
       rounds: {
         create: quizFacts.map((qf, idx) => ({
@@ -134,4 +138,3 @@ export async function POST(req: Request) {
     fact: { id: first.id, text: first.text },
   });
 }
-

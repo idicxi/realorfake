@@ -47,7 +47,6 @@ export async function POST(req: Request) {
       isTrue: true,
       explanation: true,
       sources: true,
-      funnyComment: true,
     },
   });
   if (!fact) {

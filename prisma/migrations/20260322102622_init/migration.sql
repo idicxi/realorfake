@@ -63,6 +63,7 @@ CREATE TABLE "GameSession" (
     "total" INTEGER NOT NULL,
     "current" INTEGER NOT NULL DEFAULT 0,
     "hintsUsed" INTEGER NOT NULL DEFAULT 0,
+    "hintsBudgetRemaining" INTEGER NOT NULL DEFAULT 6,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "finishedAt" DATETIME,
     CONSTRAINT "GameSession_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE SET NULL ON UPDATE CASCADE,
