@@ -482,11 +482,7 @@ export default function GameClient() {
                 <div className="text-sm font-semibold text-white/70">Таймер</div>
               </div>
 
-              <div className="flex items-center gap-2 rounded-full bg-black/40 px-3 py-1.5">
-                <span className="text-xs text-white/70">💡 Осталось:</span>
-                <span className="text-sm font-bold text-violet-300">{hintsBudgetRemaining}</span>
-                <span className="text-xs text-white/50">/ 3</span>
-              </div>
+           
 
               <Button
                 variant="secondary"
