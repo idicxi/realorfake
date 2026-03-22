@@ -141,7 +141,6 @@ export async function POST(req: Request) {
       },
       explanation: fact.explanation,
       sources: fact.sources,
-      funnyComment: fact.funnyComment,
     },
     finished,
     next: nextFact ? { currentIndex: nextCurrent, fact: nextFact } : null,
